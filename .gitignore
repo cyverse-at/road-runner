@@ -1,4 +1,7 @@
 road-runner
 test-configs/
+test-outputs/
+examples/
 workingvolume/
 irods-config*
+docker-compose.yml
