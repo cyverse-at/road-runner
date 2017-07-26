@@ -2,6 +2,8 @@ package dcompose
 
 import (
 	"fmt"
+	"log"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -203,9 +205,11 @@ func (j *JobCompose) InitFromJob(job *model.Job, cfg *viper.Viper, workingdir st
 	// Add the steps to the docker-compose file.
 	for index, step := range job.Steps {
 		j.ConvertStep(&step, index, &StepConversionConfig{
-			Username:      job.Submitter,
-			InvocationID:  job.InvocationID,
-			IsInteractive: job.IsInteractive,
+			Username:               job.Submitter,
+			InvocationID:           job.InvocationID,
+			IsInteractive:          job.IsInteractive,
+			CASAddr:                job.CASAddr,
+			OutwardFacingProxyAddr: job.OutwardFacingProxyAddr,
 		})
 	}
 
@@ -233,9 +237,11 @@ func (j *JobCompose) InitFromJob(job *model.Job, cfg *viper.Viper, workingdir st
 // StepConversionConfig contains the settings needed to convert a job step into
 // a docker-compose service.
 type StepConversionConfig struct {
-	Username      string
-	InvocationID  string
-	IsInteractive bool
+	Username               string
+	InvocationID           string
+	IsInteractive          bool
+	CASAddr                string
+	OutwardFacingProxyAddr string
 }
 
 // ConvertStep will add the job step to the JobCompose services
@@ -343,5 +349,31 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversio
 				device.CgroupPermissions,
 			),
 		)
+	}
+
+	if cfg.IsInteractive {
+		for portindex, portcfg := range stepContainer.Ports {
+			u, err := url.Parse(cfg.OutwardFacingProxyAddr)
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+			u.Path = path.Join(u.Path, cfg.InvocationID) // TODO: This will need to change when we're using subdomains.
+			ofpa := u.String()
+			j.Services[fmt.Sprintf("step_%d_proxy_%d", index, portindex)] = &Service{
+				Image: "discoenv/cas-proxy:master", //TODO change this to be configurable.
+				Command: []string{
+					"--backend-url", fmt.Sprintf("http://step_%d:%s", index, portcfg.ContainerPort),
+					"--cas-base-url", cfg.CASAddr,
+					"--frontend-url", ofpa,
+				},
+				Ports: []string{
+					"9093:8080", // TODO: this will need to be configurable.
+				},
+				DependsOn: []string{
+					fmt.Sprintf("step_%d", index),
+				},
+			}
+		}
 	}
 }
