@@ -10,13 +10,13 @@ import (
 	"path"
 	"strings"
 
+	"github.com/cyverse-de/messaging"
+	"github.com/cyverse-de/model"
 	"github.com/cyverse-de/road-runner/dcompose"
 	"github.com/cyverse-de/road-runner/fs"
 	"github.com/kr/pty"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
-	"gopkg.in/cyverse-de/messaging.v2"
-	"gopkg.in/cyverse-de/model.v1"
 )
 
 // JobRunner provides the functionality needed to run jobs.

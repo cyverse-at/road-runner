@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"gopkg.in/cyverse-de/messaging.v2"
-	"gopkg.in/cyverse-de/model.v1"
+	"github.com/cyverse-de/messaging"
+	"github.com/cyverse-de/model"
 )
 
 type TestJobUpdatePublisher struct {
@@ -40,7 +40,7 @@ func TestFail(t *testing.T) {
 	if actuallen != expectedlen {
 		t.Errorf("length of updates was %d instead of %d", actuallen, expectedlen)
 	}
-	actualid := j.updates[0].Job.InvocationID
+	actualid := j.updates[0].InvocationID
 	expectedid := "test-id"
 	if actualid != expectedid {
 		t.Errorf("invocation id was %s instead of %s", actualid, expectedid)
@@ -69,7 +69,7 @@ func TestSuccess(t *testing.T) {
 	if actuallen != expectedlen {
 		t.Errorf("length of updates was %d instead of %d", actuallen, expectedlen)
 	}
-	actualid := j.updates[0].Job.InvocationID
+	actualid := j.updates[0].InvocationID
 	expectedid := "test-id"
 	if actualid != expectedid {
 		t.Errorf("invocation id was %s instead of %s", actualid, expectedid)
@@ -90,7 +90,7 @@ func TestRunning(t *testing.T) {
 	if actuallen != expectedlen {
 		t.Errorf("length of updates was %d instead of %d", actuallen, expectedlen)
 	}
-	actualid := j.updates[0].Job.InvocationID
+	actualid := j.updates[0].InvocationID
 	expectedid := "test-id"
 	if actualid != expectedid {
 		t.Errorf("invocation id was %s instead of %s", actualid, expectedid)

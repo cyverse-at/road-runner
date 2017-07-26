@@ -1,6 +1,6 @@
 package main
 
-import "gopkg.in/cyverse-de/model.v1"
+import "github.com/cyverse-de/model"
 
 var testJob = &model.Job{
 	ID:           "test-job-id",

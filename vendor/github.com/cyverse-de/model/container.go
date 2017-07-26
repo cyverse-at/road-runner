@@ -8,6 +8,15 @@ type Volume struct {
 	Mode          string `json:"mode"`
 }
 
+// Ports contains port mapping information for a container. The ports should be
+// parseable as an integer. Callers should not provide interface information,
+// that will be handled by the services.
+type Ports struct {
+	HostPort      string `json:"host_port"`
+	ContainerPort string `json:"container_port"`
+	BindToHost    bool   `json:"bind_to_host"`
+}
+
 // Device describes the mapping between a host device and the container device.
 type Device struct {
 	HostPath          string `json:"host_path"`
@@ -52,6 +61,7 @@ type Container struct {
 	Image          ContainerImage `json:"image"`
 	EntryPoint     string         `json:"entrypoint"`
 	WorkingDir     string         `json:"working_directory"`
+	Ports          []Ports        `json:"ports"`
 }
 
 // WorkingDirectory returns the container's working directory. Defaults to

@@ -80,6 +80,7 @@ type Job struct {
 	Group              string         `json:"group"`        //untested for now
 	InvocationID       string         `json:"uuid"`
 	IRODSBase          string         `json:"irods_base"`
+	IsInteractive      bool           `json:"is_interactive"`
 	Name               string         `json:"name"`
 	NFSBase            string         `json:"nfs_base"`
 	Notify             bool           `json:"notify"`
