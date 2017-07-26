@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/cyverse-de/messaging"
 	"github.com/cyverse-de/model"
@@ -225,8 +226,164 @@ func parse(b64 string) (*authInfo, error) {
 	return a, err
 }
 
+func (r *JobRunner) runNonInteractiveStep(step *model.Step, idx int) (messaging.StatusCode, error) {
+	stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stdout-%d", idx)))
+	if err != nil {
+		log.Error(err)
+	}
+	defer stdout.Close()
+
+	stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stderr-%d", idx)))
+	if err != nil {
+		log.Error(err)
+	}
+	defer stderr.Close()
+
+	composePath := r.cfg.GetString("docker-compose.path")
+	svcname := fmt.Sprintf("step_%d", idx)
+	runCommand := exec.Command(
+		composePath,
+		"-p", r.projectName,
+		"-f", "docker-compose.yml",
+		"up",
+		"--abort-on-container-exit",
+		"--exit-code-from", svcname,
+		"--no-color",
+		svcname,
+	)
+	runCommand.Env = os.Environ()
+	runCommand.Stdout = stdout
+	runCommand.Stderr = stderr
+	err = runCommand.Run()
+
+	if err != nil {
+		running(r.client, r.job,
+			fmt.Sprintf(
+				"Error running tool container %s:%s with arguments '%s': %s",
+				step.Component.Container.Image.Name,
+				step.Component.Container.Image.Tag,
+				strings.Join(step.Arguments(), " "),
+				err.Error(),
+			),
+		)
+
+		return messaging.StatusStepFailed, err
+	}
+	return messaging.Success, err
+}
+
+func (r *JobRunner) runInteractiveStep(step *model.Step, idx int) (messaging.StatusCode, error) {
+	type exits struct {
+		status messaging.StatusCode
+		err    error
+	}
+
+	var (
+		stepgroup sync.WaitGroup // Used to synchronize the services
+		quitchan  chan int       // Used to tell the goroutine gathering exit codes to exit
+		exitschan chan exits     // Passes exit codes to the goroutine gathering exit codes
+		outputs   chan []exits   // Returns the accumulated exit codes from the goroutine that gathers the exit codes
+	)
+
+	// Start up a goroutine that can accumulate the exit codes from the running services.
+	go func(quitchan chan int, exitschan chan exits, outputs chan []exits) {
+		var allexits []exits
+		for {
+			select {
+			case e := <-exitschan:
+				allexits = append(allexits, e)
+			case <-quitchan:
+				outputs <- allexits
+				return
+			}
+		}
+
+	}(quitchan, exitschan, outputs)
+
+	// Start up the individual services in separate goroutines. Use a sync.WaitGroup
+	// to coordinate their exits.
+	for portindex, portmap := range step.Component.Container.Ports {
+		stepgroup.Add(1)
+
+		go func(step *model.Step, idx int, portmap *model.Ports, portindex int, exitschan chan exits) {
+			defer stepgroup.Done()
+
+			stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-%d-stdout", idx, portindex)))
+			if err != nil {
+				log.Error(err)
+			}
+			defer stdout.Close()
+
+			stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-%d-stderr", idx, portindex)))
+			if err != nil {
+				log.Error(err)
+			}
+			defer stderr.Close()
+
+			composePath := r.cfg.GetString("docker-compose.path")
+			svcname := fmt.Sprintf("step_%d_proxy_%d", idx, portindex)
+			runCommand := exec.Command(
+				composePath,
+				"-p", r.projectName,
+				"-f", "docker-compose.yml",
+				"up",
+				"--abort-on-container-exit",
+				"--exit-code-from", svcname,
+				"--no-color",
+				svcname,
+			)
+			runCommand.Env = os.Environ()
+			runCommand.Stdout = stdout
+			runCommand.Stderr = stderr
+			err = runCommand.Run()
+
+			if err != nil {
+				running(r.client, r.job,
+					fmt.Sprintf(
+						"Error running tool container %s:%s with arguments '%s': %s",
+						step.Component.Container.Image.Name,
+						step.Component.Container.Image.Tag,
+						strings.Join(step.Arguments(), " "),
+						err.Error(),
+					),
+				)
+
+				exitschan <- exits{messaging.StatusStepFailed, err}
+				return // Need an explicit return here to avoid accidentally sending out multiple exit codes
+			}
+			exitschan <- exits{messaging.Success, err}
+		}(step, idx, &portmap, portindex, exitschan)
+	}
+
+	// Synchronize all of the running services.
+	stepgroup.Wait()
+
+	// Tell the goroutine that gathers the exit codes to stop.
+	quitchan <- 1
+
+	// Get the accumulated exit codes from the goroutine that was gathering them.
+	jobexits := <-outputs
+
+	returnstatus := messaging.Success
+	success := true
+	var returnerr error
+
+	for _, je := range jobexits {
+		success = success && (je.status != messaging.StatusStepFailed)
+		if !success {
+			returnstatus = je.status
+			returnerr = je.err
+		}
+	}
+
+	return returnstatus, returnerr
+}
+
 func (r *JobRunner) runAllSteps() (messaging.StatusCode, error) {
-	var err error
+	var (
+		err    error
+		status messaging.StatusCode
+	)
 
 	for idx, step := range r.job.Steps {
 		running(r.client, r.job,
@@ -237,48 +394,10 @@ func (r *JobRunner) runAllSteps() (messaging.StatusCode, error) {
 				strings.Join(step.Arguments(), " "),
 			),
 		)
-
-		stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stdout-%d", idx)))
-		if err != nil {
-			log.Error(err)
-		}
-		defer stdout.Close()
-
-		stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stderr-%d", idx)))
-		if err != nil {
-			log.Error(err)
-		}
-		defer stderr.Close()
-
-		composePath := r.cfg.GetString("docker-compose.path")
-		svcname := fmt.Sprintf("step_%d", idx)
-		runCommand := exec.Command(
-			composePath,
-			"-p", r.projectName,
-			"-f", "docker-compose.yml",
-			"up",
-			"--abort-on-container-exit",
-			"--exit-code-from", svcname,
-			"--no-color",
-			svcname,
-		)
-		runCommand.Env = os.Environ()
-		runCommand.Stdout = stdout
-		runCommand.Stderr = stderr
-		err = runCommand.Run()
-
-		if err != nil {
-			running(r.client, r.job,
-				fmt.Sprintf(
-					"Error running tool container %s:%s with arguments '%s': %s",
-					step.Component.Container.Image.Name,
-					step.Component.Container.Image.Tag,
-					strings.Join(step.Arguments(), " "),
-					err.Error(),
-				),
-			)
-
-			return messaging.StatusStepFailed, err
+		if step.IsInteractive {
+			status, err = r.runInteractiveStep(&step, idx)
+		} else {
+			status, err = r.runNonInteractiveStep(&step, idx)
 		}
 
 		running(r.client, r.job,
@@ -291,7 +410,7 @@ func (r *JobRunner) runAllSteps() (messaging.StatusCode, error) {
 		// stdout.Close()
 		// stderr.Close()
 	}
-	return messaging.Success, err
+	return status, err
 }
 
 func (r *JobRunner) uploadOutputs() (messaging.StatusCode, error) {
