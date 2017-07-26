@@ -57,46 +57,48 @@ func ExtractJobID(output []byte) []byte {
 
 // Job is a type that contains info that goes into the jobs table.
 type Job struct {
-	AppDescription     string         `json:"app_description"`
-	AppID              string         `json:"app_id"`
-	AppName            string         `json:"app_name"`
-	ArchiveLogs        bool           `json:"archive_logs"`
-	ID                 string         `json:"id"`
-	BatchID            string         `json:"batch_id"`
-	CondorID           string         `json:"condor_id"`
-	CondorLogPath      string         `json:"condor_log_path"` //comes from config, not upstream service
-	CreateOutputSubdir bool           `json:"create_output_subdir"`
-	DateSubmitted      time.Time      `json:"date_submitted"`
-	DateStarted        time.Time      `json:"date_started"`
-	DateCompleted      time.Time      `json:"date_completed"`
-	Description        string         `json:"description"`
-	Email              string         `json:"email"`
-	ExecutionTarget    string         `json:"execution_target"`
-	ExitCode           int            `json:"exit_code"`
-	FailureCount       int64          `json:"failure_count"`
-	FailureThreshold   int64          `json:"failure_threshold"`
-	FileMetadata       []FileMetadata `json:"file-metadata"`
-	FilterFiles        []string       `json:"filter_files"` //comes from config, not upstream service
-	Group              string         `json:"group"`        //untested for now
-	InvocationID       string         `json:"uuid"`
-	IRODSBase          string         `json:"irods_base"`
-	IsInteractive      bool           `json:"is_interactive"`
-	Name               string         `json:"name"`
-	NFSBase            string         `json:"nfs_base"`
-	Notify             bool           `json:"notify"`
-	NowDate            string         `json:"now_date"`
-	OutputDir          string         `json:"output_dir"`   //the value parsed out of the JSON. Use OutputDirectory() instead.
-	RequestDisk        string         `json:"request_disk"` //untested for now
-	RequestType        string         `json:"request_type"`
-	RunOnNFS           bool           `json:"run-on-nfs"`
-	SkipParentMetadata bool           `json:"skip-parent-meta"`
-	Steps              []Step         `json:"steps"`
-	SubmissionDate     string         `json:"submission_date"`
-	Submitter          string         `json:"username"`
-	Type               string         `json:"type"`
-	UserID             string         `json:"user_id"`
-	UserGroups         []string       `json:"user_groups"`
-	WikiURL            string         `json:"wiki_url"`
+	AppDescription         string         `json:"app_description"`
+	AppID                  string         `json:"app_id"`
+	AppName                string         `json:"app_name"`
+	ArchiveLogs            bool           `json:"archive_logs"`
+	ID                     string         `json:"id"`
+	BatchID                string         `json:"batch_id"`
+	CASAddr                string         `json:"cas_address"`
+	CondorID               string         `json:"condor_id"`
+	CondorLogPath          string         `json:"condor_log_path"` //comes from config, not upstream service
+	CreateOutputSubdir     bool           `json:"create_output_subdir"`
+	DateSubmitted          time.Time      `json:"date_submitted"`
+	DateStarted            time.Time      `json:"date_started"`
+	DateCompleted          time.Time      `json:"date_completed"`
+	Description            string         `json:"description"`
+	Email                  string         `json:"email"`
+	ExecutionTarget        string         `json:"execution_target"`
+	ExitCode               int            `json:"exit_code"`
+	FailureCount           int64          `json:"failure_count"`
+	FailureThreshold       int64          `json:"failure_threshold"`
+	FileMetadata           []FileMetadata `json:"file-metadata"`
+	FilterFiles            []string       `json:"filter_files"` //comes from config, not upstream service
+	Group                  string         `json:"group"`        //untested for now
+	InvocationID           string         `json:"uuid"`
+	IRODSBase              string         `json:"irods_base"`
+	IsInteractive          bool           `json:"is_interactive"`
+	Name                   string         `json:"name"`
+	NFSBase                string         `json:"nfs_base"`
+	Notify                 bool           `json:"notify"`
+	NowDate                string         `json:"now_date"`
+	OutputDir              string         `json:"output_dir"` //the value parsed out of the JSON. Use OutputDirectory() instead.
+	OutwardFacingProxyAddr string         `json:"outward_facing_proxy_address"`
+	RequestDisk            string         `json:"request_disk"` //untested for now
+	RequestType            string         `json:"request_type"`
+	RunOnNFS               bool           `json:"run-on-nfs"`
+	SkipParentMetadata     bool           `json:"skip-parent-meta"`
+	Steps                  []Step         `json:"steps"`
+	SubmissionDate         string         `json:"submission_date"`
+	Submitter              string         `json:"username"`
+	Type                   string         `json:"type"`
+	UserID                 string         `json:"user_id"`
+	UserGroups             []string       `json:"user_groups"`
+	WikiURL                string         `json:"wiki_url"`
 }
 
 // New returns a pointer to a newly instantiated Job with NowDate set.
