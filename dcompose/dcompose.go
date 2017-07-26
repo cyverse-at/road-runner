@@ -202,7 +202,11 @@ func (j *JobCompose) InitFromJob(job *model.Job, cfg *viper.Viper, workingdir st
 
 	// Add the steps to the docker-compose file.
 	for index, step := range job.Steps {
-		j.ConvertStep(&step, index, job.Submitter, job.InvocationID)
+		j.ConvertStep(&step, index, &StepConversionConfig{
+			Username:      job.Submitter,
+			InvocationID:  job.InvocationID,
+			IsInteractive: job.IsInteractive,
+		})
 	}
 
 	// Add the final output job
@@ -226,8 +230,16 @@ func (j *JobCompose) InitFromJob(job *model.Job, cfg *viper.Viper, workingdir st
 	}
 }
 
+// StepConversionConfig contains the settings needed to convert a job step into
+// a docker-compose service.
+type StepConversionConfig struct {
+	Username      string
+	InvocationID  string
+	IsInteractive bool
+}
+
 // ConvertStep will add the job step to the JobCompose services
-func (j *JobCompose) ConvertStep(step *model.Step, index int, user, invID string) {
+func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversionConfig) {
 	// Construct the name of the image
 	// Set the name of the image for the container.
 	var imageName string
@@ -241,14 +253,14 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, user, invID string
 		imageName = step.Component.Container.Image.Name
 	}
 
-	step.Environment["IPLANT_USER"] = user
-	step.Environment["IPLANT_EXECUTION_ID"] = invID
+	step.Environment["IPLANT_USER"] = cfg.Username
+	step.Environment["IPLANT_EXECUTION_ID"] = cfg.InvocationID
 
 	var containername string
 	if step.Component.Container.Name != "" {
 		containername = step.Component.Container.Name
 	} else {
-		containername = fmt.Sprintf("step_%d_%s", index, invID)
+		containername = fmt.Sprintf("step_%d_%s", index, cfg.InvocationID)
 	}
 	indexstr := strconv.Itoa(index)
 	j.Services[fmt.Sprintf("step_%d", index)] = &Service{
@@ -293,7 +305,7 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, user, invID string
 
 	// Handles volumes created by other containers.
 	for _, vf := range stepContainer.VolumesFrom {
-		containerName := fmt.Sprintf("%s-%s", vf.NamePrefix, invID)
+		containerName := fmt.Sprintf("%s-%s", vf.NamePrefix, cfg.InvocationID)
 		var foundService string
 		for svckey, svc := range j.Services { // svckey is the docker-compose service name.
 			if svc.ContainerName == containerName {
@@ -304,7 +316,7 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, user, invID string
 	}
 
 	// The working directory needs to be mounted as a volume.
-	svc.Volumes = append(svc.Volumes, fmt.Sprintf("%s:%s:rw", invID, stepContainer.WorkingDirectory()))
+	svc.Volumes = append(svc.Volumes, fmt.Sprintf("%s:%s:rw", cfg.InvocationID, stepContainer.WorkingDirectory()))
 
 	// The TMPDIR needs to be mounted as a volume
 	svc.Volumes = append(svc.Volumes, fmt.Sprintf("./%s:/tmp:rw", TMPDIR))
