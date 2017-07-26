@@ -207,7 +207,7 @@ func (j *JobCompose) InitFromJob(job *model.Job, cfg *viper.Viper, workingdir st
 		j.ConvertStep(&step, index, &StepConversionConfig{
 			Username:               job.Submitter,
 			InvocationID:           job.InvocationID,
-			IsInteractive:          job.IsInteractive,
+			IsInteractive:          step.IsInteractive,
 			CASAddr:                job.CASAddr,
 			OutwardFacingProxyAddr: job.OutwardFacingProxyAddr,
 		})
