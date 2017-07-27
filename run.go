@@ -227,6 +227,7 @@ func parse(b64 string) (*authInfo, error) {
 }
 
 func (r *JobRunner) runNonInteractiveStep(step *model.Step, idx int) (messaging.StatusCode, error) {
+	log.Printf("running non-interactive tool %s:%s\n", step.Component.Container.Image.Name, step.Component.Container.Image.Tag)
 	stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stdout-%d", idx)))
 	if err != nil {
 		log.Error(err)
@@ -285,6 +286,8 @@ func (r *JobRunner) runInteractiveStep(step *model.Step, idx int) (messaging.Sta
 		outputs   chan []exits   // Returns the accumulated exit codes from the goroutine that gathers the exit codes
 	)
 
+	log.Printf("running interactive tool %s:%s\n", step.Component.Container.Image.Name, step.Component.Container.Image.Tag)
+
 	// Start up a goroutine that can accumulate the exit codes from the running services.
 	go func(quitchan chan int, exitschan chan exits, outputs chan []exits) {
 		var allexits []exits
@@ -322,6 +325,8 @@ func (r *JobRunner) runInteractiveStep(step *model.Step, idx int) (messaging.Sta
 
 			composePath := r.cfg.GetString("docker-compose.path")
 			svcname := fmt.Sprintf("step_%d_proxy_%d", idx, portindex)
+			log.Printf("starting docker-compose service %s\n", svcname)
+
 			runCommand := exec.Command(
 				composePath,
 				"-p", r.projectName,
@@ -333,8 +338,8 @@ func (r *JobRunner) runInteractiveStep(step *model.Step, idx int) (messaging.Sta
 				svcname,
 			)
 			runCommand.Env = os.Environ()
-			runCommand.Stdout = stdout
-			runCommand.Stderr = stderr
+			runCommand.Stdout = log.Writer()
+			runCommand.Stderr = log.Writer()
 			err = runCommand.Run()
 
 			if err != nil {
