@@ -377,7 +377,7 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversio
 					"--frontend-url", ofpa,
 				},
 				Ports: []string{
-					"9093:8080", // TODO: this will need to be configurable.
+					"8080",
 				},
 				DependsOn: []string{
 					fmt.Sprintf("step_%d", index),
