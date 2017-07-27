@@ -359,17 +359,18 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversio
 	}
 
 	if cfg.IsInteractive {
-		for portindex, portcfg := range stepContainer.Ports {
+		if len(step.Component.Container.Ports) > 0 {
+			portcfg := step.Component.Container.Ports[0]
 			u, err := url.Parse(cfg.OutwardFacingProxyAddr)
 			if err != nil {
 				log.Println(err)
-				continue
+				return
 			}
 			u.Path = path.Join(u.Path, cfg.InvocationID) // TODO: This will need to change when we're using subdomains.
 			ofpa := u.String()
 			backendURL := fmt.Sprintf("http://%s:%s", StepContainerName(step, index, cfg.InvocationID), portcfg.ContainerPort)
 
-			j.Services[fmt.Sprintf("step_%d_proxy_%d", index, portindex)] = &Service{
+			j.Services[fmt.Sprintf("step_%d_proxy", index)] = &Service{
 				Image: "discoenv/cas-proxy:master", //TODO change this to be configurable.
 				Command: []string{
 					"--backend-url", backendURL,

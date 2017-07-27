@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path"
 	"strings"
-	"sync"
 
 	"github.com/cyverse-de/messaging"
 	"github.com/cyverse-de/model"
@@ -274,114 +273,74 @@ func (r *JobRunner) runNonInteractiveStep(step *model.Step, idx int) (messaging.
 }
 
 func (r *JobRunner) runInteractiveStep(step *model.Step, idx int) (messaging.StatusCode, error) {
-	type exits struct {
-		status messaging.StatusCode
-		err    error
+	if len(step.Component.Container.Ports) < 1 {
+		return messaging.StatusStepFailed, errors.New("No ports opened for the container")
 	}
-
-	var (
-		stepgroup sync.WaitGroup // Used to synchronize the services
-		quitchan  chan int       // Used to tell the goroutine gathering exit codes to exit
-		exitschan chan exits     // Passes exit codes to the goroutine gathering exit codes
-		outputs   chan []exits   // Returns the accumulated exit codes from the goroutine that gathers the exit codes
-	)
-
-	log.Printf("running interactive tool %s:%s\n", step.Component.Container.Image.Name, step.Component.Container.Image.Tag)
-
-	// Start up a goroutine that can accumulate the exit codes from the running services.
-	go func(quitchan chan int, exitschan chan exits, outputs chan []exits) {
-		var allexits []exits
-		for {
-			select {
-			case e := <-exitschan:
-				allexits = append(allexits, e)
-			case <-quitchan:
-				outputs <- allexits
-				return
-			}
-		}
-
-	}(quitchan, exitschan, outputs)
 
 	// Start up the individual services in separate goroutines. Use a sync.WaitGroup
 	// to coordinate their exits.
-	for portindex, portmap := range step.Component.Container.Ports {
-		stepgroup.Add(1)
+	stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-stdout", idx)))
+	if err != nil {
+		log.Error(err)
+	}
+	defer stdout.Close()
 
-		go func(step *model.Step, idx int, portmap *model.Ports, portindex int, exitschan chan exits) {
-			defer stepgroup.Done()
+	stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-stderr", idx)))
+	if err != nil {
+		log.Error(err)
+	}
+	defer stderr.Close()
 
-			stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-%d-stdout", idx, portindex)))
-			if err != nil {
-				log.Error(err)
-			}
-			defer stdout.Close()
+	composePath := r.cfg.GetString("docker-compose.path")
+	svcname := fmt.Sprintf("step_%d_proxy", idx)
+	log.Printf("starting docker-compose service %s\n", svcname)
 
-			stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-%d-proxy-%d-stderr", idx, portindex)))
-			if err != nil {
-				log.Error(err)
-			}
-			defer stderr.Close()
+	runCommand := exec.Command(
+		composePath,
+		"-p", r.projectName,
+		"-f", "docker-compose.yml",
+		"up",
+		"--abort-on-container-exit",
+		"--exit-code-from", svcname,
+		"--no-color",
+		svcname,
+	)
+	runCommand.Env = os.Environ()
+	runCommand.Stdout = log.Writer()
+	runCommand.Stderr = log.Writer()
 
-			composePath := r.cfg.GetString("docker-compose.path")
-			svcname := fmt.Sprintf("step_%d_proxy_%d", idx, portindex)
-			log.Printf("starting docker-compose service %s\n", svcname)
+	err = runCommand.Start()
+	if err != nil {
+		running(r.client, r.job,
+			fmt.Sprintf(
+				"Error starting tool container %s:%s with arguments '%s': %s",
+				step.Component.Container.Image.Name,
+				step.Component.Container.Image.Tag,
+				strings.Join(step.Arguments(), " "),
+				err.Error(),
+			),
+		)
 
-			runCommand := exec.Command(
-				composePath,
-				"-p", r.projectName,
-				"-f", "docker-compose.yml",
-				"up",
-				"--abort-on-container-exit",
-				"--exit-code-from", svcname,
-				"--no-color",
-				svcname,
-			)
-			runCommand.Env = os.Environ()
-			runCommand.Stdout = log.Writer()
-			runCommand.Stderr = log.Writer()
-			err = runCommand.Run()
-
-			if err != nil {
-				running(r.client, r.job,
-					fmt.Sprintf(
-						"Error running tool container %s:%s with arguments '%s': %s",
-						step.Component.Container.Image.Name,
-						step.Component.Container.Image.Tag,
-						strings.Join(step.Arguments(), " "),
-						err.Error(),
-					),
-				)
-
-				exitschan <- exits{messaging.StatusStepFailed, err}
-				return // Need an explicit return here to avoid accidentally sending out multiple exit codes
-			}
-			exitschan <- exits{messaging.Success, err}
-		}(step, idx, &portmap, portindex, exitschan)
+		return messaging.StatusStepFailed, err
 	}
 
-	// Synchronize all of the running services.
-	stepgroup.Wait()
+	err = runCommand.Wait()
+	if err != nil {
+		running(r.client, r.job,
+			fmt.Sprintf(
+				"Error running tool container %s:%s with arguments '%s': %s",
+				step.Component.Container.Image.Name,
+				step.Component.Container.Image.Tag,
+				strings.Join(step.Arguments(), " "),
+				err.Error(),
+			),
+		)
 
-	// Tell the goroutine that gathers the exit codes to stop.
-	quitchan <- 1
+		return messaging.StatusStepFailed, err
 
-	// Get the accumulated exit codes from the goroutine that was gathering them.
-	jobexits := <-outputs
-
-	returnstatus := messaging.Success
-	success := true
-	var returnerr error
-
-	for _, je := range jobexits {
-		success = success && (je.status != messaging.StatusStepFailed)
-		if !success {
-			returnstatus = je.status
-			returnerr = je.err
-		}
 	}
 
-	return returnstatus, returnerr
+	return messaging.Success, err
 }
 
 func (r *JobRunner) runAllSteps() (messaging.StatusCode, error) {
