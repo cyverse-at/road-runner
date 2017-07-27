@@ -244,6 +244,17 @@ type StepConversionConfig struct {
 	OutwardFacingProxyAddr string
 }
 
+// StepContainerName returns the formatted name of the step container.
+func StepContainerName(step *model.Step, index int, invocationID string) string {
+	var containername string
+	if step.Component.Container.Name != "" {
+		containername = step.Component.Container.Name
+	} else {
+		containername = fmt.Sprintf("step_%d_%s", index, invocationID)
+	}
+	return containername
+}
+
 // ConvertStep will add the job step to the JobCompose services
 func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversionConfig) {
 	// Construct the name of the image
@@ -262,13 +273,9 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversio
 	step.Environment["IPLANT_USER"] = cfg.Username
 	step.Environment["IPLANT_EXECUTION_ID"] = cfg.InvocationID
 
-	var containername string
-	if step.Component.Container.Name != "" {
-		containername = step.Component.Container.Name
-	} else {
-		containername = fmt.Sprintf("step_%d_%s", index, cfg.InvocationID)
-	}
+	containername := StepContainerName(step, index, cfg.InvocationID)
 	indexstr := strconv.Itoa(index)
+
 	j.Services[fmt.Sprintf("step_%d", index)] = &Service{
 		Image:      imageName,
 		Command:    step.Arguments(),
@@ -360,10 +367,12 @@ func (j *JobCompose) ConvertStep(step *model.Step, index int, cfg *StepConversio
 			}
 			u.Path = path.Join(u.Path, cfg.InvocationID) // TODO: This will need to change when we're using subdomains.
 			ofpa := u.String()
+			backendURL := fmt.Sprintf("http://%s:%s", StepContainerName(step, index, cfg.InvocationID), portcfg.ContainerPort)
+
 			j.Services[fmt.Sprintf("step_%d_proxy_%d", index, portindex)] = &Service{
 				Image: "discoenv/cas-proxy:master", //TODO change this to be configurable.
 				Command: []string{
-					"--backend-url", fmt.Sprintf("http://step_%d:%s", index, portcfg.ContainerPort),
+					"--backend-url", backendURL,
 					"--cas-base-url", cfg.CASAddr,
 					"--frontend-url", ofpa,
 				},
