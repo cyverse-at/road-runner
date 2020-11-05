@@ -2,16 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path"
 	"strings"
 
-	"github.com/cyverse-de/road-runner/dcompose"
 	"github.com/cyverse-de/road-runner/fs"
+	"github.com/cyverse-de/road-runner/singularity"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -21,7 +19,7 @@ import (
 
 // logrusProxyWriter will prevent
 // "Error while reading from Writer: bufio.Scanner: token too long" errors
-// if a docker command generates a lot of output
+// if a singularity command generates a lot of output
 // (from pulling many input containers at once, for example)
 // and Logrus attempts to log all of that output in one log line.
 type logrusProxyWriter struct {
@@ -48,10 +46,11 @@ type JobRunner struct {
 	workingDir  string
 	projectName string
 	tmpDir      string
+	composer    *singularity.JobCompose
 }
 
 // NewJobRunner creates a new JobRunner
-func NewJobRunner(client JobUpdatePublisher, job *model.Job, cfg *viper.Viper, exit chan messaging.StatusCode) (*JobRunner, error) {
+func NewJobRunner(client JobUpdatePublisher, composer *singularity.JobCompose, job *model.Job, cfg *viper.Viper, exit chan messaging.StatusCode) (*JobRunner, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -63,9 +62,10 @@ func NewJobRunner(client JobUpdatePublisher, job *model.Job, cfg *viper.Viper, e
 		cfg:        cfg,
 		status:     messaging.Success,
 		workingDir: cwd,
-		volumeDir:  path.Join(cwd, dcompose.VOLUMEDIR),
-		logsDir:    path.Join(cwd, dcompose.VOLUMEDIR, "logs"),
-		tmpDir:     path.Join(cwd, dcompose.TMPDIR),
+		volumeDir:  path.Join(cwd, singularity.VOLUMEDIR),
+		logsDir:    path.Join(cwd, singularity.VOLUMEDIR, "logs"),
+		tmpDir:     path.Join(cwd, singularity.TMPDIR),
+		composer:   composer,
 	}
 	return runner, nil
 }
@@ -97,15 +97,16 @@ func (r *JobRunner) Init() error {
 		log.Error(err)
 	}
 
-	// Copy docker-compose file to the log dir for debugging purposes.
-	err = fs.CopyFile(fs.FS, "docker-compose.yml", path.Join(r.logsDir, "docker-compose.yml"))
+	// Copy singularity.yml file to the log dir for debugging purposes.
+	singymlPath := "singularity.yml"
+	err = fs.CopyFile(fs.FS, singymlPath, path.Join(r.logsDir, singymlPath))
 	if err != nil {
 		// Log error and continue.
 		log.Error(err)
 	}
 
 	// Copy upload exclude list to the log dir for debugging purposes.
-	err = fs.CopyFile(fs.FS, dcompose.UploadExcludesFilename, path.Join(r.logsDir, dcompose.UploadExcludesFilename))
+	err = fs.CopyFile(fs.FS, singularity.UploadExcludesFilename, path.Join(r.logsDir, singularity.UploadExcludesFilename))
 	if err != nil {
 		// Log error and continue.
 		log.Error(err)
@@ -139,73 +140,14 @@ func (r *JobRunner) Init() error {
 	return nil
 }
 
-// GetDockerCreds will obtain a list of Docker credentials for the current job. This function assumes that there will be
-// at most one set of credentials for each Docker registry. The result is a map from docker registry to credentials.
-func (r *JobRunner) getDockerCreds() (map[string]*authInfo, error) {
-	result := make(map[string]*authInfo)
+func (r *JobRunner) getImages() map[string][]string {
+	result := make(map[string][]string)
 
-	// Check each step in the job for credentials.
-	for _, step := range r.job.Steps {
-		container := step.Component.Container
-
-		// Add any credentials for the tool container.
-		if container.Image.Auth != "" {
-			repo := parseRepo(container.Image.Name)
-			creds, err := parse(container.Image.Auth)
-			if err != nil {
-				return nil, err
-			}
-			result[repo] = creds
-		}
-
-		// Add any credentials for data containers.
-		for _, dataContainer := range container.VolumesFrom {
-			if dataContainer.Auth != "" {
-				repo := parseRepo(dataContainer.Name)
-				creds, err := parse(dataContainer.Auth)
-				if err != nil {
-					return nil, err
-				}
-				result[repo] = creds
-			}
-		}
+	for _, svc := range r.composer.Instances {
+		result[svc.Container] = svc.AuthEnv
 	}
 
-	return result, nil
-}
-
-// DockerLogin will run "docker login" with credentials sent with the job.
-func (r *JobRunner) DockerLogin(ctx context.Context) error {
-	var err error
-	dockerBin := r.cfg.GetString("docker.path")
-
-	// Get credentials for each registry that requires authentication.
-	creds, err := r.getDockerCreds()
-	if err != nil {
-		return err
-	}
-
-	// Log in to the docker registres so that images can be pulled.
-	for registry, cred := range creds {
-		authCommand := exec.CommandContext(
-			ctx,
-			dockerBin,
-			"login",
-			"--username",
-			cred.Username,
-			"--password",
-			cred.Password,
-			registry,
-		)
-		authCommand.Env = os.Environ()
-		authCommand.Stderr = logWriter
-		authCommand.Stdout = logWriter
-		if err = authCommand.Run(); err != nil {
-			return errors.Wrapf(err, "failed to log into Docker registry %s", registry)
-		}
-	}
-
-	return nil
+	return result
 }
 
 // JobUpdatePublisher is the interface for types that need to publish a job
@@ -214,50 +156,15 @@ type JobUpdatePublisher interface {
 	PublishJobUpdate(m *messaging.UpdateMessage) error
 }
 
-func (r *JobRunner) createDataContainers(ctx context.Context) (messaging.StatusCode, error) {
-	var (
-		err error
-	)
-	composePath := r.cfg.GetString("docker-compose.path")
-	for stepIndex, step := range r.job.Steps {
-		for dcIndex := range step.Component.Container.VolumesFrom {
-			svcname := fmt.Sprintf("data_%d_%d", stepIndex, dcIndex)
-			running(r.client, r.job, fmt.Sprintf("creating data container %s", svcname))
-			dataCommand := exec.CommandContext(
-				ctx,
-				composePath,
-				"-p",
-				r.projectName,
-				"-f",
-				"docker-compose.yml",
-				"up",
-				"--abort-on-container-exit",
-				"--exit-code-from", svcname,
-				"--no-color",
-				svcname,
-			)
-			dataCommand.Env = os.Environ()
-			dataCommand.Stderr = logWriter
-			dataCommand.Stdout = logWriter
-			if err = dataCommand.Run(); err != nil {
-				running(r.client, r.job, fmt.Sprintf("error creating data container %s: %s", svcname, err.Error()))
-				return messaging.StatusDockerCreateFailed, errors.Wrapf(err, "failed to create data container %s", svcname)
-			}
-			running(r.client, r.job, fmt.Sprintf("finished creating data container %s", svcname))
-		}
-	}
-	return messaging.Success, nil
-}
-
 func (r *JobRunner) downloadInputs(ctx context.Context) (messaging.StatusCode, error) {
 	env := os.Environ()
-	composePath := r.cfg.GetString("docker-compose.path")
+	singularityBin := r.cfg.GetString("singularity.path")
 	if job.InputPathListFile != "" {
-		return r.downloadInputStep(ctx, "download_inputs", job.InputPathListFile, composePath, env)
+		return r.downloadInputStep(ctx, "download_inputs", job.InputPathListFile, singularityBin, env)
 	}
 	for index, input := range r.job.Inputs() {
 		svcname := fmt.Sprintf("input_%d", index)
-		if status, err := r.downloadInputStep(ctx, svcname, input.IRODSPath(), composePath, env); err != nil {
+		if status, err := r.downloadInputStep(ctx, svcname, input.IRODSPath(), singularityBin, env); err != nil {
 			return status, err
 		}
 	}
@@ -265,7 +172,7 @@ func (r *JobRunner) downloadInputs(ctx context.Context) (messaging.StatusCode, e
 	return messaging.Success, nil
 }
 
-func (r *JobRunner) downloadInputStep(ctx context.Context, svcname, inputPath, composePath string, env []string) (messaging.StatusCode, error) {
+func (r *JobRunner) downloadInputStep(ctx context.Context, svcname, inputPath, singularityBin string, env []string) (messaging.StatusCode, error) {
 	var (
 		exitCode int64
 	)
@@ -280,21 +187,16 @@ func (r *JobRunner) downloadInputStep(ctx context.Context, svcname, inputPath, c
 		log.Error(err)
 	}
 	defer stdout.Close()
-	downloadCommand := exec.CommandContext(
-		ctx,
-		composePath,
-		"-p", r.projectName,
-		"-f", "docker-compose.yml",
-		"up",
-		"--no-color",
-		"--abort-on-container-exit",
-		"--exit-code-from", svcname,
-		svcname,
-	)
-	downloadCommand.Env = env
-	downloadCommand.Stderr = stderr
+
+	singenv, cmdline := r.composer.GenCmdline(svcname, false)
+	singenv = append(singenv, env...)
+	downloadCommand := exec.CommandContext(ctx, singularityBin, cmdline...)
+	downloadCommand.Env = singenv
 	downloadCommand.Stdout = stdout
-	if err = downloadCommand.Run(); err != nil {
+	downloadCommand.Stderr = stderr
+	err = downloadCommand.Run()
+
+	if err != nil {
 		running(r.client, r.job, fmt.Sprintf("error downloading %s: %s", inputPath, err.Error()))
 		return messaging.StatusInputFailed, errors.Wrapf(err, "failed to download %s with an exit code of %d", inputPath, exitCode)
 	}
@@ -303,21 +205,6 @@ func (r *JobRunner) downloadInputStep(ctx context.Context, svcname, inputPath, c
 	running(r.client, r.job, fmt.Sprintf("finished downloading %s", inputPath))
 
 	return messaging.Success, nil
-}
-
-type authInfo struct {
-	Username string
-	Password string
-}
-
-func parse(b64 string) (*authInfo, error) {
-	jsonstring, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, err
-	}
-	a := &authInfo{}
-	err = json.Unmarshal(jsonstring, a)
-	return a, err
 }
 
 func (r *JobRunner) runAllSteps(ctx context.Context) (messaging.StatusCode, error) {
@@ -333,32 +220,26 @@ func (r *JobRunner) runAllSteps(ctx context.Context) (messaging.StatusCode, erro
 			),
 		)
 
-		stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stdout-%d", idx)))
+		stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("step-stdout-%d", idx)))
 		if err != nil {
 			log.Error(err)
 		}
 		defer stdout.Close()
 
-		stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("docker-compose-step-stderr-%d", idx)))
+		stderr, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("step-stderr-%d", idx)))
 		if err != nil {
 			log.Error(err)
 		}
 		defer stderr.Close()
 
-		composePath := r.cfg.GetString("docker-compose.path")
+		singularityBin := r.cfg.GetString("singularity.path")
 		svcname := fmt.Sprintf("step_%d", idx)
-		runCommand := exec.CommandContext(
-			ctx,
-			composePath,
-			"-p", r.projectName,
-			"-f", "docker-compose.yml",
-			"up",
-			"--abort-on-container-exit",
-			"--exit-code-from", svcname,
-			"--no-color",
-			svcname,
-		)
-		runCommand.Env = os.Environ()
+
+		singenv, cmdline := r.composer.GenCmdline(svcname, true)
+		singenv = append(singenv, os.Environ()...)
+
+		runCommand := exec.CommandContext(ctx, singularityBin, cmdline...)
+		runCommand.Env = singenv
 		runCommand.Stdout = stdout
 		runCommand.Stderr = stderr
 		err = runCommand.Run()
@@ -392,7 +273,7 @@ func (r *JobRunner) runAllSteps(ctx context.Context) (messaging.StatusCode, erro
 
 func (r *JobRunner) uploadOutputs() (messaging.StatusCode, error) {
 	var err error
-	composePath := r.cfg.GetString("docker-compose.path")
+	singularityBin := r.cfg.GetString("singularity.path")
 	stdout, err := os.Create(path.Join(r.logsDir, fmt.Sprintf("logs-stdout-output")))
 	if err != nil {
 		log.Error(err)
@@ -403,16 +284,10 @@ func (r *JobRunner) uploadOutputs() (messaging.StatusCode, error) {
 		log.Error(err)
 	}
 	defer stderr.Close()
-	outputCommand := exec.Command(
-		composePath,
-		"-p", r.projectName,
-		"-f", "docker-compose.yml",
-		"up",
-		"--no-color",
-		"--abort-on-container-exit",
-		"--exit-code-from", "upload_outputs",
-		"upload_outputs",
-	)
+
+	singenv, cmdline := r.composer.GenCmdline("upload_outputs", true)
+	outputCommand := exec.Command(singularityBin, cmdline...)
+	outputCommand.Env = singenv
 	outputCommand.Stdout = stdout
 	outputCommand.Stderr = stderr
 	err = outputCommand.Run()
@@ -426,23 +301,44 @@ func (r *JobRunner) uploadOutputs() (messaging.StatusCode, error) {
 	return messaging.Success, nil
 }
 
-func parseRepo(imagename string) string {
-	if strings.Contains(imagename, "/") {
-		parts := strings.Split(imagename, "/")
-		return parts[0]
+func (r *JobRunner) pullImages() (messaging.StatusCode, error) {
+	images := r.getImages()
+
+	env := os.Environ()
+	singularityBin := r.cfg.GetString("singularity.path")
+
+	logfile, err := os.Create(path.Join(r.logsDir, "singularity-pull.log"))
+	if err != nil {
+		log.Error(err)
 	}
-	return ""
+	defer logfile.Close()
+
+	for imageName, authEnv := range images {
+		pullCommand := exec.Command(singularityBin, "pull", imageName)
+		pullCommand.Env = append(authEnv, env...)
+		pullCommand.Dir = r.workingDir
+		pullCommand.Stdout = logfile
+		pullCommand.Stderr = logfile
+
+		err = pullCommand.Run()
+		if err != nil {
+			log.Error(err)
+			return messaging.StatusDockerPullFailed, errors.Wrapf(err, "failed to pull image: %s", imageName)
+		}
+	}
+
+	return messaging.Success, nil
 }
 
 // Run executes the job, and returns the exit code on the exit channel.
-func Run(ctx context.Context, client JobUpdatePublisher, job *model.Job, cfg *viper.Viper, exit chan messaging.StatusCode) {
+func Run(ctx context.Context, client JobUpdatePublisher, composer *singularity.JobCompose, job *model.Job, cfg *viper.Viper, exit chan messaging.StatusCode) {
 	host, err := os.Hostname()
 	if err != nil {
 		log.Error(err)
 		host = "UNKNOWN"
 	}
 
-	runner, err := NewJobRunner(client, job, cfg, exit)
+	runner, err := NewJobRunner(client, composer, job, cfg, exit)
 	if err != nil {
 		log.Error(err)
 	}
@@ -457,34 +353,8 @@ func Run(ctx context.Context, client JobUpdatePublisher, job *model.Job, cfg *vi
 	// let everyone know the job is running
 	running(runner.client, runner.job, fmt.Sprintf("Job %s is running on host %s", runner.job.InvocationID, host))
 
-	if err = runner.DockerLogin(ctx); err != nil {
+	if runner.status, err = runner.pullImages(); err != nil {
 		log.Error(err)
-	}
-
-	networkName := fmt.Sprintf("%s_default", runner.projectName)
-	dockerPath := cfg.GetString("docker.path")
-	networkCreateCmd := exec.CommandContext(ctx, dockerPath, "network", "create", "--driver", "bridge", networkName)
-	networkCreateCmd.Env = os.Environ()
-	networkCreateCmd.Dir = runner.workingDir
-	networkCreateCmd.Stdout = logWriter
-	networkCreateCmd.Stderr = logWriter
-
-	err = networkCreateCmd.Run()
-	if err != nil {
-		log.Error(err) // don't need to fail, since docker-compose is *supposed* to create the network
-	}
-
-	composePath := cfg.GetString("docker-compose.path")
-	pullCommand := exec.CommandContext(ctx, composePath, "-p", runner.projectName, "-f", "docker-compose.yml", "pull", "--parallel")
-	pullCommand.Env = os.Environ()
-	pullCommand.Dir = runner.workingDir
-	pullCommand.Stdout = logWriter
-	pullCommand.Stderr = logWriter
-
-	err = pullCommand.Run()
-	if err != nil {
-		log.Error(err)
-		runner.status = messaging.StatusDockerPullFailed
 	}
 
 	if err = fs.WriteJobSummary(fs.FS, runner.logsDir, job); err != nil {
@@ -493,12 +363,6 @@ func Run(ctx context.Context, client JobUpdatePublisher, job *model.Job, cfg *vi
 
 	if err = fs.WriteJobParameters(fs.FS, runner.logsDir, job); err != nil {
 		log.Error(err)
-	}
-
-	if runner.status == messaging.Success {
-		if runner.status, err = runner.createDataContainers(ctx); err != nil {
-			log.Error(err)
-		}
 	}
 
 	// If pulls didn't succeed then we can't guarantee that we've got the

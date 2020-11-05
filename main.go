@@ -1,7 +1,7 @@
 // road-runner
 //
 // Executes jobs based on a JSON blob serialized to a file.
-// Each step of the job runs inside a Docker container. Job results are
+// Each step of the job runs inside a singularity container. Job results are
 // transferred back into iRODS with the porklock tool. Job status updates are
 // posted to the **jobs.updates** topic in the **jobs** exchange.
 package main
@@ -13,15 +13,13 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/signal"
-	"syscall"
 
 	yaml "gopkg.in/yaml.v2"
 
 	"github.com/cyverse-de/configurate"
 	"github.com/cyverse-de/logcabin"
-	"github.com/cyverse-de/road-runner/dcompose"
 	"github.com/cyverse-de/road-runner/fs"
+	"github.com/cyverse-de/road-runner/singularity"
 	"github.com/cyverse-de/version"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -50,7 +48,7 @@ func init() {
 
 // Creates the output upload exclusions file, required by the JobCompose InitFromJob method.
 func createUploadExclusionsFile() {
-	excludeFile, err := os.Create(dcompose.UploadExcludesFilename)
+	excludeFile, err := os.Create(singularity.UploadExcludesFilename)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -73,18 +71,13 @@ type CleanableJob struct {
 
 func main() {
 	var (
-		showVersion = flag.Bool("version", false, "Print the version information")
-		jobFile     = flag.String("job", "", "The path to the job description file")
-		cfgPath     = flag.String("config", "", "The path to the config file")
-		writeTo     = flag.String("write-to", "/opt/image-janitor", "The directory to copy job files to.")
-		composePath = flag.String("docker-compose", "docker-compose.yml", "The filepath to use when writing the docker-compose file.")
-		composeBin  = flag.String("docker-compose-path", "/usr/bin/docker-compose", "The path to the docker-compose binary.")
-		dockerBin   = flag.String("docker-path", "/usr/bin/docker", "The path to the docker binary.")
-		dockerCfg   = flag.String("docker-cfg", "/var/lib/condor/.docker", "The path to the .docker directory.")
-		logdriver   = flag.String("log-driver", "de-logging", "The name of the Docker log driver to use in job steps.")
-		pathprefix  = flag.String("path-prefix", "/var/lib/condor", "The path prefix for the stderr/stdout logs.")
-		err         error
-		cfg         *viper.Viper
+		showVersion    = flag.Bool("version", false, "Print the version information")
+		jobFile        = flag.String("job", "", "The path to the job description file")
+		cfgPath        = flag.String("config", "", "The path to the config file")
+		writeTo        = flag.String("write-to", "/software/cyverse/image-janitor", "The directory to copy job files to.")
+		singularityBin = flag.String("singularity-path", "singularity", "The path to the singularity binary.")
+		err            error
+		cfg            *viper.Viper
 	)
 
 	logcabin.Init("road-runner", "road-runner")
@@ -112,14 +105,15 @@ func main() {
 			log.Info("Signal handler is quitting")
 		},
 	)
-	signal.Notify(
-		sighandler.Signals,
-		os.Interrupt,
-		os.Kill,
-		syscall.SIGTERM,
-		syscall.SIGSTOP,
-		syscall.SIGQUIT,
-	)
+	/*
+		signal.Notify(
+			sighandler.Signals,
+			os.Interrupt,
+			os.Kill,
+			syscall.SIGTERM,
+			syscall.SIGSTOP,
+			syscall.SIGQUIT,
+		)*/
 
 	flag.Parse()
 
@@ -147,9 +141,7 @@ func main() {
 		log.Fatal("--job must be set.")
 	}
 
-	cfg.Set("docker-compose.path", *composeBin)
-	cfg.Set("docker.path", *dockerBin)
-	cfg.Set("docker.cfg", *dockerCfg)
+	cfg.Set("singularity.path", *singularityBin)
 
 	wd, err := os.Getwd()
 	if err != nil {
@@ -203,8 +195,8 @@ func main() {
 	// status updates.
 	client.SetupPublishing(amqpExchangeName)
 
-	// Generate the docker-compose file used to execute the job.
-	composer, err := dcompose.New(*logdriver, *pathprefix)
+	// Create a new singularity manager, this holds all the instances and their options.
+	composer, err := singularity.New()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -212,13 +204,13 @@ func main() {
 	// Create the output upload exclusions file required by the JobCompose InitFromJob method.
 	createUploadExclusionsFile()
 
-	// Populates the data structure that will become the docker-compose file with
+	// Populates the data structure that will become the singularity commands with
 	// information from the job definition.
-	composer.InitFromJob(job, cfg, wd)
+	composer.InitFromJob(job, cfg, "")
 
-	// Write out the docker-compose file. This will get transferred back with the
+	// Write out the singularity.yml file for debugging. This will get transferred back with the
 	// job outputs, which makes debugging stuff a lot easier.
-	c, err := os.Create(*composePath)
+	c, err := os.Create("singularity.yml")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -261,7 +253,7 @@ func main() {
 	)
 
 	// Actually execute all of the job steps.
-	go Run(ctx, client, job, cfg, exit)
+	go Run(ctx, client, composer, job, cfg, exit)
 
 	// Block waiting for the exit code, which will come from Run().
 	exitCode := <-finalExit
